@@ -2,9 +2,59 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "./supabase";
 import "./App.css";
 
-/* =========================
-   LASAR ICONS
-========================= */
+const MAX_VIDEO_SIZE = 50 * 1024 * 1024;
+
+const BLOCKED_CONTENT =
+  /\b(porn|porno|pornography|xxx|nsfw|nude|nudity|sex|sexual|explicit|hentai|onlyfans|adult-content|erotic|fetish|rape|bestiality)\b/i;
+
+
+/* =========================================================
+   HELPERS
+========================================================= */
+
+function getChannelName(user, fallback = "LASAR Channel") {
+  return (
+    user?.user_metadata?.display_name ||
+    user?.user_metadata?.full_name ||
+    user?.email?.split("@")[0] ||
+    fallback
+  );
+}
+
+function formatDate(date) {
+  if (!date) return "";
+
+  const diff = Date.now() - new Date(date).getTime();
+
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  if (hours < 24) return `${hours} hr ago`;
+  if (days < 7) return `${days} days ago`;
+
+  return new Date(date).toLocaleDateString();
+}
+
+async function sha256Hex(file) {
+  const buffer = await file.arrayBuffer();
+
+  const hash = await crypto.subtle.digest(
+    "SHA-256",
+    buffer
+  );
+
+  return Array.from(new Uint8Array(hash))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+
+/* =========================================================
+   ICONS
+========================================================= */
 
 function Icon({ name, size = 22, stroke = 2 }) {
   const common = {
@@ -67,8 +117,18 @@ function Icon({ name, size = 22, stroke = 2 }) {
         <path d="M7 8h10a4 4 0 0 1 3.8 5l-1.2 4a2.5 2.5 0 0 1-4.5.6L14 16H10l-1.1 1.6a2.5 2.5 0 0 1-4.5-.6l-1.2-4A4 4 0 0 1 7 8Z" />
         <path d="M7 11v4" />
         <path d="M5 13h4" />
-        <circle cx="16.5" cy="12.5" r=".7" fill="currentColor" />
-        <circle cx="18.5" cy="14.5" r=".7" fill="currentColor" />
+        <circle
+          cx="16.5"
+          cy="12.5"
+          r=".7"
+          fill="currentColor"
+        />
+        <circle
+          cx="18.5"
+          cy="14.5"
+          r=".7"
+          fill="currentColor"
+        />
       </>
     ),
 
@@ -151,9 +211,24 @@ function Icon({ name, size = 22, stroke = 2 }) {
 
     more: (
       <>
-        <circle cx="5" cy="12" r="1" fill="currentColor" />
-        <circle cx="12" cy="12" r="1" fill="currentColor" />
-        <circle cx="19" cy="12" r="1" fill="currentColor" />
+        <circle
+          cx="5"
+          cy="12"
+          r="1"
+          fill="currentColor"
+        />
+        <circle
+          cx="12"
+          cy="12"
+          r="1"
+          fill="currentColor"
+        />
+        <circle
+          cx="19"
+          cy="12"
+          r="1"
+          fill="currentColor"
+        />
       </>
     ),
 
@@ -183,42 +258,22 @@ function Icon({ name, size = 22, stroke = 2 }) {
     ),
 
     check: <path d="m5 12 4 4L19 6" />,
+
+    shield: (
+      <>
+        <path d="M12 3 20 6v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6l8-3Z" />
+        <path d="m9 12 2 2 4-4" />
+      </>
+    ),
   };
 
-  return <svg {...common}>{paths[name]}</svg>;
+  return <svg {...common}>{paths[name] || paths.play}</svg>;
 }
 
-/* =========================
-   HELPERS
-========================= */
 
-function formatDate(date) {
-  const diff = Date.now() - new Date(date).getTime();
-
-  const minutes = Math.floor(diff / 60000);
-  const hours = Math.floor(diff / 3600000);
-  const days = Math.floor(diff / 86400000);
-
-  if (minutes < 1) return "just now";
-  if (minutes < 60) return `${minutes} min ago`;
-  if (hours < 24) return `${hours} hr ago`;
-  if (days < 7) return `${days} days ago`;
-
-  return new Date(date).toLocaleDateString();
-}
-
-function getChannelName(user, fallback = "LASAR Channel") {
-  return (
-    user?.user_metadata?.display_name ||
-    user?.user_metadata?.full_name ||
-    user?.email?.split("@")[0] ||
-    fallback
-  );
-}
-
-/* =========================
+/* =========================================================
    MAIN APP
-========================= */
+========================================================= */
 
 export default function App() {
   const [session, setSession] = useState(null);
@@ -236,9 +291,29 @@ export default function App() {
   const [selectedVideo, setSelectedVideo] = useState(null);
   const [selectedChannel, setSelectedChannel] = useState(null);
 
+  const [signedUrls, setSignedUrls] = useState({});
+
   const [showUpload, setShowUpload] = useState(false);
   const [showAuth, setShowAuth] = useState(false);
   const [showMobileMenu, setShowMobileMenu] = useState(false);
+
+  const [showNotifications, setShowNotifications] =
+    useState(false);
+
+  const [readNotificationIds, setReadNotificationIds] =
+    useState(() => {
+      try {
+        return (
+          JSON.parse(
+            localStorage.getItem(
+              "lasar_read_notifications"
+            )
+          ) || []
+        );
+      } catch {
+        return [];
+      }
+    });
 
   const [authMode, setAuthMode] = useState("signin");
 
@@ -247,7 +322,9 @@ export default function App() {
   const [settings, setSettings] = useState(() => {
     try {
       return (
-        JSON.parse(localStorage.getItem("lasar_settings")) || {
+        JSON.parse(
+          localStorage.getItem("lasar_settings")
+        ) || {
           autoplay: true,
           dataSaver: false,
           captions: false,
@@ -262,45 +339,35 @@ export default function App() {
     }
   });
 
-  /* =====================================================
-     SUPABASE AUTH
-     
-     IMPORTANT:
-     PASSWORD_RECOVERY is handled here.
-  ===================================================== */
+
+  /* =======================================================
+     AUTH
+  ======================================================= */
 
   useEffect(() => {
     let mounted = true;
 
-    async function getInitialSession() {
-      const { data } = await supabase.auth.getSession();
-
+    supabase.auth.getSession().then(({ data }) => {
       if (!mounted) return;
 
       setSession(data.session);
       setLoading(false);
-    }
-
-    getInitialSession();
+    });
 
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((event, newSession) => {
-      if (!mounted) return;
+    } = supabase.auth.onAuthStateChange(
+      (event, newSession) => {
+        if (!mounted) return;
 
-      setSession(newSession);
+        setSession(newSession);
 
-      /*
-        When the user clicks the password-reset email,
-        Supabase sends PASSWORD_RECOVERY.
-
-        We then open the "Create a new password" screen.
-      */
-      if (event === "PASSWORD_RECOVERY") {
-        setAuthMode("reset");
-        setShowAuth(true);
+        if (event === "PASSWORD_RECOVERY") {
+          setAuthMode("reset");
+          setShowAuth(true);
+        }
       }
-    });
+    );
 
     return () => {
       mounted = false;
@@ -308,28 +375,139 @@ export default function App() {
     };
   }, []);
 
-  /* =========================
-     LOAD VIDEOS
-  ========================= */
 
-  async function loadVideos() {
-    const { data, error } = await supabase
-      .from("videos")
-      .select("*")
-      .order("created_at", {
-        ascending: false,
-      });
+  /* =======================================================
+     STORAGE
+  ======================================================= */
 
-    if (!error) {
-      setVideos(data || []);
-    } else {
-      console.error("Video loading error:", error);
+  function getStoragePath(video) {
+    if (video?.storage_path) {
+      return video.storage_path;
     }
+
+    const marker =
+      "/storage/v1/object/public/videos/";
+
+    const url = video?.video_url || "";
+
+    const index = url.indexOf(marker);
+
+    if (index >= 0) {
+      return decodeURIComponent(
+        url.slice(index + marker.length)
+      );
+    }
+
+    return "";
   }
 
-  /* =========================
-     LOAD USER DATA
-  ========================= */
+
+  async function getSignedUrl(video) {
+    const path = getStoragePath(video);
+
+    if (!path) return "";
+
+    const { data, error } =
+      await supabase.storage
+        .from("videos")
+        .createSignedUrl(path, 3600);
+
+    if (error) {
+      console.error(
+        "Signed URL error:",
+        error
+      );
+
+      return "";
+    }
+
+    return data?.signedUrl || "";
+  }
+
+
+  async function refreshSignedUrls(videoList) {
+    const validVideos = videoList.filter(
+      (video) => getStoragePath(video)
+    );
+
+    if (!validVideos.length) {
+      setSignedUrls({});
+      return;
+    }
+
+    const paths = validVideos.map(
+      getStoragePath
+    );
+
+    const { data, error } =
+      await supabase.storage
+        .from("videos")
+        .createSignedUrls(paths, 3600);
+
+    if (error) {
+      console.error(
+        "Signed URL error:",
+        error
+      );
+
+      return;
+    }
+
+    const next = {};
+
+    (data || []).forEach((item) => {
+      if (!item.path || !item.signedUrl) return;
+
+      const video = validVideos.find(
+        (v) => getStoragePath(v) === item.path
+      );
+
+      if (video) {
+        next[video.id] = item.signedUrl;
+      }
+    });
+
+    setSignedUrls(next);
+  }
+
+
+  /* =======================================================
+     LOAD VIDEOS
+  ======================================================= */
+
+  async function loadVideos() {
+    const { data, error } =
+      await supabase
+        .from("videos")
+        .select("*")
+        .order("created_at", {
+          ascending: false,
+        });
+
+    if (error) {
+      console.error(
+        "Load videos error:",
+        error
+      );
+
+      setMessage(
+        "Could not load videos. Check your Supabase policies."
+      );
+
+      return;
+    }
+
+    const list = data || [];
+
+    setVideos(list);
+
+    refreshSignedUrls(list);
+  }
+
+
+  /* =======================================================
+     USER DATA
+  ======================================================= */
 
   async function loadUserData(userId) {
     if (!userId) {
@@ -339,29 +517,34 @@ export default function App() {
       return;
     }
 
-    const [likesResult, subscriptionsResult, historyResult] =
-      await Promise.all([
-        supabase
-          .from("video_likes")
-          .select("video_id")
-          .eq("user_id", userId),
+    const [
+      likesResult,
+      subscriptionsResult,
+      historyResult,
+    ] = await Promise.all([
+      supabase
+        .from("video_likes")
+        .select("video_id")
+        .eq("user_id", userId),
 
-        supabase
-          .from("subscriptions")
-          .select("channel_id")
-          .eq("subscriber_id", userId),
+      supabase
+        .from("subscriptions")
+        .select("channel_id")
+        .eq("subscriber_id", userId),
 
-        supabase
-          .from("watch_history")
-          .select("video_id, watched_at")
-          .eq("user_id", userId)
-          .order("watched_at", {
-            ascending: false,
-          }),
-      ]);
+      supabase
+        .from("watch_history")
+        .select("video_id, watched_at")
+        .eq("user_id", userId)
+        .order("watched_at", {
+          ascending: false,
+        }),
+    ]);
 
     setLikes(
-      (likesResult.data || []).map((item) => item.video_id)
+      (likesResult.data || []).map(
+        (item) => item.video_id
+      )
     );
 
     setSubscriptions(
@@ -370,17 +553,187 @@ export default function App() {
       )
     );
 
-    setHistory(historyResult.data || []);
+    setHistory(
+      historyResult.data || []
+    );
   }
+
 
   useEffect(() => {
     loadVideos();
-    loadUserData(session?.user?.id || null);
+
+    loadUserData(
+      session?.user?.id || null
+    );
   }, [session?.user?.id]);
 
-  /* =========================
+
+  /* =======================================================
+     NOTIFICATIONS
+  ======================================================= */
+
+  const notifications = useMemo(() => {
+    if (!session) return [];
+
+    const items = [];
+
+    /*
+      Because Supabase RLS controls which rows the user can
+      see, pending notifications are safe here:
+      normal users see their own pending uploads,
+      admin sees the moderation queue.
+    */
+
+    videos
+      .filter(
+        (video) =>
+          video.owner_id === session.user.id &&
+          (
+            video.moderation_status ===
+              "approved" ||
+            video.moderation_status ===
+              "rejected"
+          )
+      )
+      .slice(0, 20)
+      .forEach((video) => {
+        const approved =
+          video.moderation_status ===
+          "approved";
+
+        const stamp =
+          video.moderation_checked_at ||
+          video.approved_at ||
+          video.created_at;
+
+        items.push({
+          id:
+            `moderation-${video.id}-` +
+            `${video.moderation_status}-` +
+            `${stamp || ""}`,
+
+          icon: approved
+            ? "check"
+            : "close",
+
+          title: approved
+            ? "Your video was approved"
+            : "Your video was rejected",
+
+          text: approved
+            ? `“${
+                video.title ||
+                "Untitled video"
+              }” is now available on LASAR.`
+            : `“${
+                video.title ||
+                "Untitled video"
+              }” was rejected${
+                video.moderation_reason
+                  ? `: ${video.moderation_reason}`
+                  : "."
+              }`,
+
+          time: stamp,
+
+          video,
+        });
+      });
+
+
+    videos
+      .filter(
+        (video) =>
+          video.moderation_status ===
+          "pending"
+      )
+      .slice(0, 20)
+      .forEach((video) => {
+        items.push({
+          id:
+            `pending-${video.id}-` +
+            `${video.created_at || ""}`,
+
+          icon: "shield",
+
+          title:
+            "Video waiting for moderation",
+
+          text:
+            `${video.channel_name || "A creator"} ` +
+            `uploaded “${
+              video.title ||
+              "Untitled video"
+            }”.`,
+
+          time: video.created_at,
+
+          admin: true,
+
+          video,
+        });
+      });
+
+
+    return items
+      .sort(
+        (a, b) =>
+          new Date(b.time || 0) -
+          new Date(a.time || 0)
+      )
+      .slice(0, 30);
+  }, [session, videos]);
+
+
+  const unreadNotifications =
+    notifications.filter(
+      (item) =>
+        !readNotificationIds.includes(
+          item.id
+        )
+    );
+
+
+  function markNotificationsRead(ids) {
+    setReadNotificationIds((old) => {
+      const next = Array.from(
+        new Set([
+          ...old,
+          ...ids,
+        ])
+      ).slice(-200);
+
+      localStorage.setItem(
+        "lasar_read_notifications",
+        JSON.stringify(next)
+      );
+
+      return next;
+    });
+  }
+
+
+  function openNotification(item) {
+    markNotificationsRead([
+      item.id,
+    ]);
+
+    setShowNotifications(false);
+
+    if (item.admin) {
+      navigate("admin");
+      return;
+    }
+
+    if (item.video) {
+      openVideo(item.video);
+    }
+  }
+
+
+  /* =======================================================
      SETTINGS
-  ========================= */
+  ======================================================= */
 
   function updateSetting(name) {
     setSettings((old) => {
@@ -398,49 +751,75 @@ export default function App() {
     });
   }
 
-  /* =========================
+
+  /* =======================================================
      FILTER VIDEOS
-  ========================= */
+  ======================================================= */
 
   const filteredVideos = useMemo(() => {
-    let result = [...videos];
+    /*
+      Only approved videos are shown in normal video pages.
+      This prevents pending videos from appearing publicly.
+    */
+
+    let result = videos.filter(
+      (video) =>
+        video.moderation_status ===
+        "approved"
+    );
+
 
     if (page === "shorts") {
-      result = result.filter((video) => video.is_short);
+      result = result.filter(
+        (video) => video.is_short
+      );
     }
+
 
     if (page === "music") {
       result = result.filter(
         (video) =>
-          video.category?.toLowerCase() === "music"
+          video.category?.toLowerCase() ===
+          "music"
       );
     }
+
 
     if (page === "gaming") {
       result = result.filter(
         (video) =>
-          video.category?.toLowerCase() === "gaming"
+          video.category?.toLowerCase() ===
+          "gaming"
       );
     }
+
 
     if (page === "trending") {
       result.sort(
         (a, b) =>
-          (b.views || 0) - (a.views || 0)
+          Number(b.views || 0) -
+          Number(a.views || 0)
       );
     }
+
 
     if (page === "subscriptions") {
-      result = result.filter((video) =>
-        subscriptions.includes(video.owner_id)
+      result = result.filter(
+        (video) =>
+          subscriptions.includes(
+            video.owner_id
+          )
       );
     }
 
+
     if (page === "liked") {
-      result = result.filter((video) =>
-        likes.includes(video.id)
+      result = result.filter(
+        (video) =>
+          likes.includes(video.id)
       );
     }
+
 
     if (page === "history") {
       const ids = history.map(
@@ -449,10 +828,16 @@ export default function App() {
 
       result = ids
         .map((id) =>
-          videos.find((video) => video.id === id)
+          videos.find(
+            (video) =>
+              video.id === id &&
+              video.moderation_status ===
+                "approved"
+          )
         )
         .filter(Boolean);
     }
+
 
     if (category !== "All") {
       result = result.filter(
@@ -462,23 +847,31 @@ export default function App() {
       );
     }
 
-    const q = search.trim().toLowerCase();
 
-    if (q) {
+    const query =
+      search.trim().toLowerCase();
+
+    if (query) {
       result = result.filter(
         (video) =>
-          video.title?.toLowerCase().includes(q) ||
+          video.title
+            ?.toLowerCase()
+            .includes(query) ||
+
           video.channel_name
             ?.toLowerCase()
-            .includes(q) ||
+            .includes(query) ||
+
           video.description
             ?.toLowerCase()
-            .includes(q) ||
+            .includes(query) ||
+
           video.category
             ?.toLowerCase()
-            .includes(q)
+            .includes(query)
       );
     }
+
 
     return result;
   }, [
@@ -491,9 +884,10 @@ export default function App() {
     history,
   ]);
 
-  /* =========================
-     LIKE / UNLIKE
-  ========================= */
+
+  /* =======================================================
+     LIKE
+  ======================================================= */
 
   async function toggleLike(video) {
     if (!session) {
@@ -502,204 +896,418 @@ export default function App() {
       return;
     }
 
-    const liked = likes.includes(video.id);
+    const liked =
+      likes.includes(video.id);
+
 
     if (liked) {
-      const { error } = await supabase
-        .from("video_likes")
-        .delete()
-        .eq("user_id", session.user.id)
-        .eq("video_id", video.id);
+      const { error } =
+        await supabase
+          .from("video_likes")
+          .delete()
+          .eq(
+            "user_id",
+            session.user.id
+          )
+          .eq(
+            "video_id",
+            video.id
+          );
 
-      if (!error) {
-        setLikes((old) =>
-          old.filter((id) => id !== video.id)
-        );
+      if (error) {
+        setMessage(error.message);
+        return;
       }
-    } else {
-      const { error } = await supabase
+
+      setLikes((old) =>
+        old.filter(
+          (id) => id !== video.id
+        )
+      );
+
+      return;
+    }
+
+
+    const { error } =
+      await supabase
         .from("video_likes")
         .insert({
-          user_id: session.user.id,
-          video_id: video.id,
+          user_id:
+            session.user.id,
+
+          video_id:
+            video.id,
         });
 
-      if (!error) {
-        setLikes((old) => [
-          ...old,
-          video.id,
-        ]);
-      }
+
+    if (error) {
+      setMessage(error.message);
+      return;
     }
+
+
+    setLikes((old) => [
+      ...old,
+      video.id,
+    ]);
   }
 
-  /* =========================
-     SUBSCRIBE / UNSUBSCRIBE
-  ========================= */
 
-  async function toggleSubscribe(channelId) {
+  /* =======================================================
+     SUBSCRIBE
+  ======================================================= */
+
+  async function toggleSubscribe(
+    channelId
+  ) {
     if (!session) {
       setAuthMode("signin");
       setShowAuth(true);
       return;
     }
 
-    if (channelId === session.user.id) {
+    if (
+      channelId ===
+      session.user.id
+    ) {
       return;
     }
 
     const subscribed =
-      subscriptions.includes(channelId);
+      subscriptions.includes(
+        channelId
+      );
+
 
     if (subscribed) {
-      const { error } = await supabase
-        .from("subscriptions")
-        .delete()
-        .eq(
-          "subscriber_id",
-          session.user.id
-        )
-        .eq("channel_id", channelId);
-
-      if (!error) {
-        setSubscriptions((old) =>
-          old.filter(
-            (id) => id !== channelId
+      const { error } =
+        await supabase
+          .from("subscriptions")
+          .delete()
+          .eq(
+            "subscriber_id",
+            session.user.id
           )
-        );
+          .eq(
+            "channel_id",
+            channelId
+          );
+
+      if (error) {
+        setMessage(error.message);
+        return;
       }
-    } else {
-      const { error } = await supabase
+
+      setSubscriptions((old) =>
+        old.filter(
+          (id) =>
+            id !== channelId
+        )
+      );
+
+      return;
+    }
+
+
+    const { error } =
+      await supabase
         .from("subscriptions")
         .insert({
-          subscriber_id: session.user.id,
-          channel_id: channelId,
+          subscriber_id:
+            session.user.id,
+
+          channel_id:
+            channelId,
         });
 
-      if (!error) {
-        setSubscriptions((old) => [
-          ...old,
-          channelId,
-        ]);
-      }
+
+    if (error) {
+      setMessage(error.message);
+      return;
     }
+
+
+    setSubscriptions((old) => [
+      ...old,
+      channelId,
+    ]);
   }
 
-  /* =========================
+
+  /* =======================================================
      OPEN VIDEO
-  ========================= */
+  ======================================================= */
 
   async function openVideo(video) {
-    setSelectedVideo(video);
+    const url =
+      signedUrls[video.id] ||
+      (await getSignedUrl(video));
+
+
+    setSelectedVideo({
+      ...video,
+      signedUrl: url,
+    });
+
 
     if (!session) return;
+
 
     await supabase
       .from("watch_history")
       .upsert(
         {
-          user_id: session.user.id,
-          video_id: video.id,
-          watched_at: new Date().toISOString(),
+          user_id:
+            session.user.id,
+
+          video_id:
+            video.id,
+
+          watched_at:
+            new Date().toISOString(),
         },
         {
-          onConflict: "user_id,video_id",
+          onConflict:
+            "user_id,video_id",
         }
       );
 
-    loadUserData(session.user.id);
+
+    loadUserData(
+      session.user.id
+    );
   }
 
-  /* =========================
+
+  /* =======================================================
      DELETE VIDEO
-  ========================= */
+  ======================================================= */
 
   async function deleteVideo(video) {
-    if (
-      !session ||
-      video.owner_id !== session.user.id
-    ) {
-      return;
+    if (!session) return;
+
+
+    const isOwner =
+      video.owner_id ===
+      session.user.id;
+
+
+    /*
+      Owner deletion is allowed directly.
+      Admin deletion is protected by Supabase RLS.
+      If someone is not the owner, ask for confirmation
+      and let the database policy make the final decision.
+    */
+
+    if (!isOwner) {
+      const confirmed =
+        window.confirm(
+          "This action requires administrator permission. Continue?"
+        );
+
+      if (!confirmed) return;
+    } else {
+      const confirmed =
+        window.confirm(
+          `Delete "${video.title}" permanently?`
+        );
+
+      if (!confirmed) return;
     }
 
-    const confirmed = window.confirm(
-      `Delete "${video.title}" permanently?`
+
+    setMessage(
+      "Deleting video..."
     );
 
-    if (!confirmed) return;
 
-    setMessage("Deleting video...");
+    const storagePath =
+      getStoragePath(video);
 
-    const { error: storageError } =
-      await supabase.storage
-        .from("videos")
-        .remove([video.storage_path]);
 
-    if (storageError) {
-      console.error(storageError);
-      setMessage(
-        "Could not delete the video file."
-      );
-      return;
+    if (storagePath) {
+      const { error } =
+        await supabase.storage
+          .from("videos")
+          .remove([
+            storagePath,
+          ]);
+
+      if (error) {
+        console.error(
+          "Storage delete error:",
+          error
+        );
+
+        setMessage(
+          `Could not delete video file: ${error.message}`
+        );
+
+        return;
+      }
     }
 
-    const { error: dbError } = await supabase
-      .from("videos")
-      .delete()
-      .eq("id", video.id)
-      .eq("owner_id", session.user.id);
+
+    const { error: dbError } =
+      await supabase
+        .from("videos")
+        .delete()
+        .eq("id", video.id);
+
 
     if (dbError) {
-      console.error(dbError);
-      setMessage(
-        "File deleted, but database record could not be removed."
+      console.error(
+        "Database delete error:",
+        dbError
       );
+
+      setMessage(
+        dbError.message
+      );
+
       return;
     }
+
 
     setVideos((old) =>
       old.filter(
-        (item) => item.id !== video.id
+        (item) =>
+          item.id !== video.id
       )
     );
 
+
+    setSignedUrls((old) => {
+      const next = {
+        ...old,
+      };
+
+      delete next[video.id];
+
+      return next;
+    });
+
+
     if (
-      selectedVideo?.id === video.id
+      selectedVideo?.id ===
+      video.id
     ) {
       setSelectedVideo(null);
     }
 
+
     setMessage(
       "Video deleted successfully."
     );
-
-    setTimeout(() => {
-      setMessage("");
-    }, 2500);
   }
 
-  /* =========================
-     SIGN OUT
-  ========================= */
 
-  async function signOut() {
-    await supabase.auth.signOut();
+  /* =======================================================
+     ADMIN MODERATION
+  ======================================================= */
 
-    setPage("home");
-    setShowMobileMenu(false);
+  async function moderateVideo(
+    video,
+    status
+  ) {
+    if (!session) {
+      setMessage(
+        "Please sign in first."
+      );
+
+      return;
+    }
+
+
+    let reason = null;
+
+
+    if (
+      status === "rejected"
+    ) {
+      reason =
+        window.prompt(
+          "Enter the reason for rejecting this video:"
+        ) ||
+        "Rejected by LASAR administrator.";
+    }
+
+
+    const now =
+      new Date().toISOString();
+
+
+    const updateData = {
+      moderation_status:
+        status,
+
+      moderation_reason:
+        reason,
+
+      moderation_checked_at:
+        now,
+
+      approved_at:
+        status === "approved"
+          ? now
+          : null,
+    };
+
+
+    const { error } =
+      await supabase
+        .from("videos")
+        .update(updateData)
+        .eq("id", video.id);
+
+
+    if (error) {
+      console.error(
+        "Moderation error:",
+        error
+      );
+
+      setMessage(
+        `Could not ${status} this video: ${error.message}`
+      );
+
+      return;
+    }
+
+
+    setVideos((old) =>
+      old.map((item) =>
+        item.id === video.id
+          ? {
+              ...item,
+              ...updateData,
+            }
+          : item
+      )
+    );
+
+
+    setMessage(
+      status === "approved"
+        ? "Video approved and published."
+        : "Video rejected."
+    );
   }
 
-  /* =========================
+
+  /* =======================================================
      NAVIGATION
-  ========================= */
+  ======================================================= */
 
   function navigate(target) {
     setPage(target);
     setCategory("All");
-    setSelectedChannel(null);
     setSearch("");
+    setSelectedChannel(null);
     setShowMobileMenu(false);
   }
+
 
   function openChannel(ownerId) {
     setSelectedChannel(ownerId);
@@ -708,9 +1316,10 @@ export default function App() {
     setCategory("All");
   }
 
-  /* =========================
-     LOADING SCREEN
-  ========================= */
+
+  /* =======================================================
+     LOADING
+  ======================================================= */
 
   if (loading) {
     return (
@@ -720,14 +1329,16 @@ export default function App() {
         </div>
 
         <strong>LASAR</strong>
+
         <p>Loading...</p>
       </div>
     );
   }
 
-  /* =========================
-     MAIN UI
-  ========================= */
+
+  /* =======================================================
+     UI
+  ======================================================= */
 
   return (
     <div className="app">
@@ -749,6 +1360,7 @@ export default function App() {
             <Icon name="menu" />
           </button>
 
+
           <button
             className="brand"
             onClick={() =>
@@ -756,7 +1368,7 @@ export default function App() {
             }
           >
             <span className="brand-logo">
-              A
+              L
             </span>
 
             <span className="brand-name">
@@ -765,6 +1377,9 @@ export default function App() {
           </button>
 
         </div>
+
+
+        {/* SEARCH */}
 
         <div className="search-area">
 
@@ -778,9 +1393,11 @@ export default function App() {
             <input
               value={search}
               onChange={(e) =>
-                setSearch(e.target.value)
+                setSearch(
+                  e.target.value
+                )
               }
-              placeholder="Search"
+              placeholder="Search videos and channels"
             />
 
             {search && (
@@ -799,12 +1416,16 @@ export default function App() {
 
           </div>
 
-          <button className="search-button">
+
+          <button
+            className="search-button"
+          >
             <Icon
               name="search"
               size={21}
             />
           </button>
+
 
           <button
             className="mic-button"
@@ -818,13 +1439,19 @@ export default function App() {
 
         </div>
 
+
+        {/* TOP ACTIONS */}
+
         <div className="top-actions">
 
           <button
             className="create-button"
             onClick={() => {
               if (!session) {
-                setAuthMode("signin");
+                setAuthMode(
+                  "signin"
+                );
+
                 setShowAuth(true);
               } else {
                 setShowUpload(true);
@@ -835,26 +1462,85 @@ export default function App() {
               name="plus"
               size={20}
             />
+
             <span>Create</span>
           </button>
 
-          <button
-            className="icon-button notification-button"
-          >
-            <Icon name="bell" />
 
-            {session && (
-              <span className="notification-dot" />
-            )}
-          </button>
+          <div
+            style={{
+              position:
+                "relative",
+            }}
+          >
+
+            <button
+              className="icon-button notification-button"
+              onClick={() => {
+                if (!session) {
+                  setAuthMode(
+                    "signin"
+                  );
+
+                  setShowAuth(true);
+
+                  return;
+                }
+
+                setShowNotifications(
+                  (old) => !old
+                );
+              }}
+              aria-label="Notifications"
+              title="Notifications"
+            >
+
+              <Icon name="bell" />
+
+              {session &&
+                unreadNotifications.length >
+                  0 && (
+                  <span className="notification-dot" />
+                )}
+
+            </button>
+
+
+            {session &&
+              showNotifications && (
+                <NotificationPanel
+                  notifications={
+                    notifications
+                  }
+                  readIds={
+                    readNotificationIds
+                  }
+                  onOpen={
+                    openNotification
+                  }
+                  onMarkAllRead={() =>
+                    markNotificationsRead(
+                      notifications.map(
+                        (item) =>
+                          item.id
+                      )
+                    )
+                  }
+                />
+              )}
+
+          </div>
+
 
           {session ? (
+
             <button
               className="profile-avatar"
               onClick={() => {
                 setSelectedChannel(
                   session.user.id
                 );
+
                 setPage("channel");
               }}
             >
@@ -864,11 +1550,16 @@ export default function App() {
                 .charAt(0)
                 .toUpperCase()}
             </button>
+
           ) : (
+
             <button
               className="signin-top"
               onClick={() => {
-                setAuthMode("signin");
+                setAuthMode(
+                  "signin"
+                );
+
                 setShowAuth(true);
               }}
             >
@@ -876,25 +1567,33 @@ export default function App() {
                 name="user"
                 size={19}
               />
+
               Sign in
             </button>
+
           )}
 
         </div>
+
       </header>
+
 
       {/* SIDEBAR */}
 
       <aside
         className={`sidebar ${
-          showMobileMenu ? "open" : ""
+          showMobileMenu
+            ? "open"
+            : ""
         }`}
       >
 
         <SidebarItem
           icon="home"
           text="Home"
-          active={page === "home"}
+          active={
+            page === "home"
+          }
           onClick={() =>
             navigate("home")
           }
@@ -903,7 +1602,9 @@ export default function App() {
         <SidebarItem
           icon="shorts"
           text="Shorts"
-          active={page === "shorts"}
+          active={
+            page === "shorts"
+          }
           onClick={() =>
             navigate("shorts")
           }
@@ -913,18 +1614,23 @@ export default function App() {
           icon="subscriptions"
           text="Subscriptions"
           active={
-            page === "subscriptions"
+            page ===
+            "subscriptions"
           }
           onClick={() =>
-            navigate("subscriptions")
+            navigate(
+              "subscriptions"
+            )
           }
         />
+
 
         <div className="sidebar-line" />
 
         <div className="sidebar-heading">
           You
         </div>
+
 
         <SidebarItem
           icon="channel"
@@ -936,8 +1642,12 @@ export default function App() {
           }
           onClick={() => {
             if (!session) {
-              setAuthMode("signin");
+              setAuthMode(
+                "signin"
+              );
+
               setShowAuth(true);
+
               return;
             }
 
@@ -949,32 +1659,42 @@ export default function App() {
           }}
         />
 
+
         <SidebarItem
           icon="history"
           text="History"
-          active={page === "history"}
+          active={
+            page === "history"
+          }
           onClick={() =>
             navigate("history")
           }
         />
 
+
         <SidebarItem
           icon="library"
           text="Playlists"
-          active={page === "library"}
+          active={
+            page === "library"
+          }
           onClick={() =>
             navigate("library")
           }
         />
 
+
         <SidebarItem
           icon="like"
           text="Liked videos"
-          active={page === "liked"}
+          active={
+            page === "liked"
+          }
           onClick={() =>
             navigate("liked")
           }
         />
+
 
         <div className="sidebar-line" />
 
@@ -982,49 +1702,87 @@ export default function App() {
           Explore
         </div>
 
+
         <SidebarItem
           icon="trending"
           text="Trending"
-          active={page === "trending"}
+          active={
+            page === "trending"
+          }
           onClick={() =>
             navigate("trending")
           }
         />
 
+
         <SidebarItem
           icon="music"
           text="Music"
-          active={page === "music"}
+          active={
+            page === "music"
+          }
           onClick={() =>
             navigate("music")
           }
         />
 
+
         <SidebarItem
           icon="gaming"
           text="Gaming"
-          active={page === "gaming"}
+          active={
+            page === "gaming"
+          }
           onClick={() =>
             navigate("gaming")
           }
         />
 
+
+        {session && (
+          <>
+            <div className="sidebar-line" />
+
+            <div className="sidebar-heading">
+              Admin
+            </div>
+
+            <SidebarItem
+              icon="shield"
+              text="Moderation"
+              active={
+                page === "admin"
+              }
+              onClick={() =>
+                navigate("admin")
+              }
+            />
+          </>
+        )}
+
+
         <div className="sidebar-line" />
+
 
         <SidebarItem
           icon="settings"
           text="Settings"
-          active={page === "settings"}
+          active={
+            page === "settings"
+          }
           onClick={() =>
             navigate("settings")
           }
         />
 
+
         <div className="sidebar-footer">
           <span>LASAR</span>
+
           <span>
             Watch. Create. Share.
           </span>
+
           <small>
             LASAR version 2.0
           </small>
@@ -1032,12 +1790,15 @@ export default function App() {
 
       </aside>
 
+
       {/* MAIN */}
 
       <main className="main">
 
         {page !== "settings" &&
-          page !== "channel" && (
+          page !== "channel" &&
+          page !== "admin" && (
+
             <div className="category-bar">
 
               {[
@@ -1049,6 +1810,7 @@ export default function App() {
                 "Technology",
                 "Shorts",
               ].map((item) => (
+
                 <button
                   key={item}
                   className={`category-chip ${
@@ -1057,7 +1819,9 @@ export default function App() {
                       : ""
                   }`}
                   onClick={() => {
-                    setCategory(item);
+                    setCategory(
+                      item
+                    );
 
                     setPage(
                       item === "Shorts"
@@ -1068,10 +1832,13 @@ export default function App() {
                 >
                   {item}
                 </button>
+
               ))}
 
             </div>
+
           )}
+
 
         {message && (
           <div className="app-message">
@@ -1079,153 +1846,244 @@ export default function App() {
           </div>
         )}
 
-        {search.trim() &&
-          page !== "settings" && (
-            <div className="page-title">
-              <h1>Search results</h1>
 
-              <p>
-                Results for{" "}
-                <strong>
-                  "{search}"
-                </strong>
-              </p>
-            </div>
-          )}
-
-        {/* HOME WELCOME */}
+        {/* HOME */}
 
         {page === "home" &&
           !search.trim() && (
+
             <HomeHero
               session={session}
               onCreate={() => {
                 if (!session) {
-                  setAuthMode("signin");
+                  setAuthMode(
+                    "signin"
+                  );
+
                   setShowAuth(true);
                 } else {
                   setShowUpload(true);
                 }
               }}
             />
+
           )}
+
 
         {/* CHANNEL */}
 
         {page === "channel" && (
+
           <ChannelPage
             ownerId={
               selectedChannel ||
               session?.user?.id
             }
+
             videos={videos}
+
             session={session}
+
+            signedUrls={
+              signedUrls
+            }
+
+            likes={likes}
+
             subscriptions={
               subscriptions
             }
+
+            onLike={
+              toggleLike
+            }
+
             onSubscribe={
               toggleSubscribe
             }
-            onVideo={openVideo}
-            onDelete={deleteVideo}
+
+            onVideo={
+              openVideo
+            }
+
+            onChannel={
+              openChannel
+            }
+
+            onDelete={
+              deleteVideo
+            }
           />
+
         )}
+
 
         {/* SETTINGS */}
 
         {page === "settings" && (
+
           <SettingsPage
             session={session}
             settings={settings}
             updateSetting={
               updateSetting
             }
-            onSignOut={signOut}
+            onSignOut={async () => {
+              await supabase.auth.signOut();
+
+              navigate("home");
+            }}
           />
+
         )}
 
-        {/* PLAYLIST */}
+
+        {/* PLAYLISTS */}
 
         {page === "library" && (
+
           <SimplePage
             title="Playlists"
             icon="library"
             description="Your saved LASAR videos and playlists."
-            videos={[]}
             emptyTitle="No playlists yet"
             emptyText="Your playlists will appear here."
           />
+
         )}
 
-        {/* VIDEO LIST */}
 
-        {page !== "settings" &&
-          page !== "channel" &&
-          page !== "library" && (
-            <VideoSection
-              title={
-                search.trim()
-                  ? "Search results"
-                  : page === "shorts"
-                  ? "Shorts"
-                  : page ===
-                    "subscriptions"
-                  ? "Subscriptions"
-                  : page ===
-                    "trending"
-                  ? "Trending videos"
-                  : page === "music"
-                  ? "Music"
-                  : page === "gaming"
-                  ? "Gaming"
-                  : page === "history"
-                  ? "Watch history"
-                  : page === "liked"
-                  ? "Liked videos"
-                  : "Recommended videos"
-              }
-              videos={
-                filteredVideos
-              }
-              session={session}
-              likes={likes}
-              subscriptions={
-                subscriptions
-              }
-              onLike={toggleLike}
-              onSubscribe={
-                toggleSubscribe
-              }
-              onVideo={openVideo}
-              onChannel={
-                openChannel
-              }
-              onDelete={
-                deleteVideo
-              }
-              emptyTitle={
-                search.trim()
-                  ? "No videos found"
-                  : page ===
-                    "subscriptions"
-                  ? "No subscription videos yet"
-                  : page === "history"
-                  ? "Your watch history is empty"
-                  : page === "liked"
-                  ? "You haven't liked any videos yet"
-                  : page === "shorts"
-                  ? "No Shorts yet"
-                  : "No videos yet"
-              }
-              emptyText={
-                search.trim()
-                  ? "Try another search."
-                  : "When a user uploads a video, it will appear here."
-              }
-            />
-          )}
+        {/* ADMIN */}
+
+        {page === "admin" && (
+
+          <AdminModerationPage
+            session={session}
+            videos={videos}
+            signedUrls={
+              signedUrls
+            }
+
+            onApprove={(video) =>
+              moderateVideo(
+                video,
+                "approved"
+              )
+            }
+
+            onReject={(video) =>
+              moderateVideo(
+                video,
+                "rejected"
+              )
+            }
+
+            onDelete={
+              deleteVideo
+            }
+
+            onVideo={
+              openVideo
+            }
+          />
+
+        )}
+
+
+        {/* VIDEO PAGES */}
+
+        {![
+          "settings",
+          "channel",
+          "library",
+          "admin",
+        ].includes(page) && (
+
+          <VideoSection
+            title={
+              search.trim()
+                ? "Search results"
+                : page === "shorts"
+                ? "Shorts"
+                : page ===
+                  "subscriptions"
+                ? "Subscriptions"
+                : page ===
+                  "trending"
+                ? "Trending videos"
+                : page === "music"
+                ? "Music"
+                : page === "gaming"
+                ? "Gaming"
+                : page === "history"
+                ? "Watch history"
+                : page === "liked"
+                ? "Liked videos"
+                : "Recommended videos"
+            }
+
+            videos={
+              filteredVideos
+            }
+
+            session={session}
+
+            likes={likes}
+
+            subscriptions={
+              subscriptions
+            }
+
+            signedUrls={
+              signedUrls
+            }
+
+            onLike={
+              toggleLike
+            }
+
+            onSubscribe={
+              toggleSubscribe
+            }
+
+            onVideo={
+              openVideo
+            }
+
+            onChannel={
+              openChannel
+            }
+
+            onDelete={
+              deleteVideo
+            }
+
+            emptyTitle={
+              search.trim()
+                ? "No videos found"
+                : page ===
+                  "subscriptions"
+                ? "No subscription videos yet"
+                : page === "history"
+                ? "Your watch history is empty"
+                : page === "liked"
+                ? "You haven't liked any videos yet"
+                : page === "shorts"
+                ? "No Shorts yet"
+                : "No videos yet"
+            }
+
+            emptyText={
+              search.trim()
+                ? "Try another search."
+                : "When an approved video is available, it will appear here."
+            }
+          />
+
+        )}
 
       </main>
+
 
       {/* MOBILE NAV */}
 
@@ -1234,7 +2092,9 @@ export default function App() {
         <MobileNavItem
           icon="home"
           label="Home"
-          active={page === "home"}
+          active={
+            page === "home"
+          }
           onClick={() =>
             navigate("home")
           }
@@ -1243,17 +2103,23 @@ export default function App() {
         <MobileNavItem
           icon="shorts"
           label="Shorts"
-          active={page === "shorts"}
+          active={
+            page === "shorts"
+          }
           onClick={() =>
             navigate("shorts")
           }
         />
 
+
         <button
           className="mobile-create"
           onClick={() => {
             if (!session) {
-              setAuthMode("signin");
+              setAuthMode(
+                "signin"
+              );
+
               setShowAuth(true);
             } else {
               setShowUpload(true);
@@ -1268,16 +2134,21 @@ export default function App() {
           </span>
         </button>
 
+
         <MobileNavItem
           icon="subscriptions"
           label="Subs"
           active={
-            page === "subscriptions"
+            page ===
+            "subscriptions"
           }
           onClick={() =>
-            navigate("subscriptions")
+            navigate(
+              "subscriptions"
+            )
           }
         />
+
 
         <MobileNavItem
           icon="library"
@@ -1293,69 +2164,99 @@ export default function App() {
 
       </nav>
 
+
       {/* VIDEO PLAYER */}
 
       {selectedVideo && (
+
         <VideoPlayer
-          video={selectedVideo}
+          video={
+            selectedVideo
+          }
+
           session={session}
+
           liked={likes.includes(
             selectedVideo.id
           )}
+
           subscribed={subscriptions.includes(
             selectedVideo.owner_id
           )}
+
           onLike={() =>
-            toggleLike(selectedVideo)
+            toggleLike(
+              selectedVideo
+            )
           }
+
           onSubscribe={() =>
             toggleSubscribe(
               selectedVideo.owner_id
             )
           }
+
           onDelete={() =>
-            deleteVideo(selectedVideo)
+            deleteVideo(
+              selectedVideo
+            )
           }
+
           onClose={() =>
             setSelectedVideo(null)
           }
+
+          videoUrl={
+            selectedVideo.signedUrl ||
+            signedUrls[
+              selectedVideo.id
+            ] ||
+            ""
+          }
+
           autoplay={
             settings.autoplay
           }
+
           captions={
             settings.captions
           }
         />
+
       )}
 
-      {/* UPLOAD MODAL */}
+
+      {/* UPLOAD */}
 
       {showUpload && (
+
         <UploadModal
           session={session}
+
           onClose={() =>
             setShowUpload(false)
           }
+
           onUploaded={async () => {
             await loadVideos();
 
             setShowUpload(false);
+
             setPage("home");
 
             setMessage(
-              "Video uploaded successfully!"
+              "Video uploaded successfully. It is waiting for moderation."
             );
-
-            setTimeout(() => {
-              setMessage("");
-            }, 3000);
           }}
         />
+
       )}
 
-      {/* AUTH MODAL */}
+
+      {/* AUTH */}
 
       {showAuth && (
+
         <AuthModal
           mode={authMode}
           setMode={setAuthMode}
@@ -1363,7 +2264,9 @@ export default function App() {
             setShowAuth(false)
           }
         />
+
       )}
+
 
       {showMobileMenu && (
         <div
@@ -1378,9 +2281,10 @@ export default function App() {
   );
 }
 
-/* =========================
+
+/* =========================================================
    SIDEBAR ITEM
-========================= */
+========================================================= */
 
 function SidebarItem({
   icon,
@@ -1405,9 +2309,10 @@ function SidebarItem({
   );
 }
 
-/* =========================
+
+/* =========================================================
    MOBILE NAV ITEM
-========================= */
+========================================================= */
 
 function MobileNavItem({
   icon,
@@ -1432,9 +2337,10 @@ function MobileNavItem({
   );
 }
 
-/* =========================
+
+/* =========================================================
    HOME HERO
-========================= */
+========================================================= */
 
 function HomeHero({
   session,
@@ -1456,6 +2362,7 @@ function HomeHero({
         </div>
 
         <div>
+
           <h1>
             Welcome
             {session
@@ -1469,9 +2376,11 @@ function HomeHero({
             Watch, create and share
             videos on LASAR.
           </p>
+
         </div>
 
       </div>
+
 
       <button
         className="welcome-create"
@@ -1489,9 +2398,10 @@ function HomeHero({
   );
 }
 
-/* =========================
+
+/* =========================================================
    VIDEO SECTION
-========================= */
+========================================================= */
 
 function VideoSection({
   title,
@@ -1504,6 +2414,7 @@ function VideoSection({
   onVideo,
   onChannel,
   onDelete,
+  signedUrls = {},
   emptyTitle,
   emptyText,
 }) {
@@ -1511,6 +2422,7 @@ function VideoSection({
     <section className="video-section">
 
       <div className="section-heading">
+
         <h2>{title}</h2>
 
         {videos.length > 0 && (
@@ -1518,19 +2430,25 @@ function VideoSection({
             {videos.length} videos
           </span>
         )}
+
       </div>
 
+
       {videos.length === 0 ? (
+
         <EmptyState
           icon="play"
           title={emptyTitle}
           text={emptyText}
           signedIn={!!session}
         />
+
       ) : (
+
         <div className="video-grid">
 
           {videos.map((video) => (
+
             <VideoCard
               key={video.id}
               video={video}
@@ -1549,20 +2467,30 @@ function VideoSection({
               onChannel={
                 onChannel
               }
-              onDelete={onDelete}
+              onDelete={
+                onDelete
+              }
+              videoUrl={
+                signedUrls[
+                  video.id
+                ] || ""
+              }
             />
+
           ))}
 
         </div>
+
       )}
 
     </section>
   );
 }
 
-/* =========================
+
+/* =========================================================
    VIDEO CARD
-========================= */
+========================================================= */
 
 function VideoCard({
   video,
@@ -1574,9 +2502,12 @@ function VideoCard({
   onVideo,
   onChannel,
   onDelete,
+  videoUrl,
 }) {
-  const [showMenu, setShowMenu] =
-    useState(false);
+  const [
+    showMenu,
+    setShowMenu,
+  ] = useState(false);
 
   return (
     <article className="video-card">
@@ -1592,12 +2523,26 @@ function VideoCard({
         }
       >
 
-        <video
-          src={video.video_url}
-          muted
-          preload="metadata"
-          className="thumbnail-video"
-        />
+        {videoUrl ? (
+
+          <video
+            src={videoUrl}
+            muted
+            preload="metadata"
+            className="thumbnail-video"
+          />
+
+        ) : (
+
+          <div className="thumbnail-placeholder">
+            <Icon
+              name="play"
+              size={35}
+            />
+          </div>
+
+        )}
+
 
         <span className="thumbnail-play">
           <Icon
@@ -1605,6 +2550,7 @@ function VideoCard({
             size={25}
           />
         </span>
+
 
         {video.is_short && (
           <span className="short-label">
@@ -1614,9 +2560,10 @@ function VideoCard({
 
       </button>
 
+
       <div className="video-details">
 
-        <div
+        <button
           className="channel-avatar-small"
           onClick={() =>
             onChannel(
@@ -1628,7 +2575,8 @@ function VideoCard({
             "L")
             .charAt(0)
             .toUpperCase()}
-        </div>
+        </button>
+
 
         <div className="video-text">
 
@@ -1640,6 +2588,7 @@ function VideoCard({
           >
             {video.title}
           </button>
+
 
           <button
             className="video-channel"
@@ -1653,7 +2602,9 @@ function VideoCard({
               "LASAR Channel"}
           </button>
 
+
           <div className="video-meta">
+
             <span>
               {Number(
                 video.views || 0
@@ -1668,13 +2619,17 @@ function VideoCard({
                 video.created_at
               )}
             </span>
+
           </div>
+
 
           <div className="card-actions">
 
             <button
               className={`small-action ${
-                liked ? "liked" : ""
+                liked
+                  ? "liked"
+                  : ""
               }`}
               onClick={() =>
                 onLike(video)
@@ -1690,9 +2645,11 @@ function VideoCard({
                 : "Like"}
             </button>
 
+
             {session &&
               video.owner_id !==
                 session.user.id && (
+
                 <button
                   className={`small-action ${
                     subscribed
@@ -1714,7 +2671,9 @@ function VideoCard({
                     ? "Subscribed"
                     : "Subscribe"}
                 </button>
+
               )}
+
 
             <div className="more-container">
 
@@ -1733,7 +2692,9 @@ function VideoCard({
                 />
               </button>
 
+
               {showMenu && (
+
                 <div className="video-menu">
 
                   <button
@@ -1749,31 +2710,31 @@ function VideoCard({
                     Watch
                   </button>
 
-                  {session &&
-                    video.owner_id ===
-                      session.user.id && (
-                      <button
-                        className="delete-menu"
-                        onClick={() => {
-                          setShowMenu(
-                            false
-                          );
 
-                          onDelete(
-                            video
-                          );
-                        }}
-                      >
-                        <Icon
-                          name="trash"
-                          size={17}
-                        />
+                  {session && (
+                    <button
+                      className="delete-menu"
+                      onClick={() => {
+                        setShowMenu(
+                          false
+                        );
 
-                        Delete
-                      </button>
-                    )}
+                        onDelete(
+                          video
+                        );
+                      }}
+                    >
+                      <Icon
+                        name="trash"
+                        size={17}
+                      />
+
+                      Delete
+                    </button>
+                  )}
 
                 </div>
+
               )}
 
             </div>
@@ -1788,9 +2749,10 @@ function VideoCard({
   );
 }
 
-/* =========================
+
+/* =========================================================
    EMPTY STATE
-========================= */
+========================================================= */
 
 function EmptyState({
   icon,
@@ -1823,9 +2785,10 @@ function EmptyState({
   );
 }
 
-/* =========================
+
+/* =========================================================
    VIDEO PLAYER
-========================= */
+========================================================= */
 
 function VideoPlayer({
   video,
@@ -1838,9 +2801,11 @@ function VideoPlayer({
   onClose,
   autoplay,
   captions,
+  videoUrl,
 }) {
   const videoRef =
     useRef(null);
+
 
   useEffect(() => {
     if (
@@ -1851,7 +2816,11 @@ function VideoPlayer({
         .play()
         .catch(() => {});
     }
-  }, [video, autoplay]);
+  }, [
+    video,
+    autoplay,
+  ]);
+
 
   return (
     <div
@@ -1879,38 +2848,73 @@ function VideoPlayer({
             <Icon name="close" />
           </button>
 
-          <strong>LASAR</strong>
+          <strong>
+            LASAR
+          </strong>
 
         </div>
+
 
         <div className="player-video-wrapper">
 
-          <video
-            ref={videoRef}
-            src={video.video_url}
-            controls
-            autoPlay={autoplay}
-            className="player-video"
-            muted={false}
-          >
-            {captions && (
-              <track
-                kind="captions"
-                label="Captions"
-                srcLang="en"
+          {videoUrl ? (
+
+            <video
+              ref={videoRef}
+              src={videoUrl}
+              controls
+              controlsList="nodownload noremoteplayback"
+              disablePictureInPicture
+              onContextMenu={(e) =>
+                e.preventDefault()
+              }
+              autoPlay={autoplay}
+              className="player-video"
+            >
+              {captions && (
+                <track
+                  kind="captions"
+                  label="Captions"
+                  srcLang="en"
+                />
+              )}
+            </video>
+
+          ) : (
+
+            <div
+              style={{
+                padding: 40,
+                textAlign:
+                  "center",
+              }}
+            >
+              <Icon
+                name="play"
+                size={50}
               />
-            )}
-          </video>
+
+              <p>
+                Video could not be
+                loaded.
+              </p>
+            </div>
+
+          )}
 
         </div>
 
+
         <div className="player-info">
 
-          <h2>{video.title}</h2>
+          <h2>
+            {video.title}
+          </h2>
+
 
           <div className="player-channel-row">
 
-            <button className="player-channel">
+            <div className="player-channel">
 
               <span>
                 {(video.channel_name ||
@@ -1920,6 +2924,7 @@ function VideoPlayer({
               </span>
 
               <div>
+
                 <strong>
                   {video.channel_name ||
                     "LASAR Channel"}
@@ -1934,13 +2939,16 @@ function VideoPlayer({
                     video.created_at
                   )}
                 </small>
+
               </div>
 
-            </button>
+            </div>
+
 
             {session &&
               video.owner_id !==
                 session.user.id && (
+
                 <button
                   className={`subscribe-large ${
                     subscribed
@@ -1955,9 +2963,11 @@ function VideoPlayer({
                     ? "Subscribed"
                     : "Subscribe"}
                 </button>
+
               )}
 
           </div>
+
 
           <div className="player-actions">
 
@@ -1979,23 +2989,25 @@ function VideoPlayer({
                 : "Like"}
             </button>
 
-            {session &&
-              video.owner_id ===
-                session.user.id && (
-                <button
-                  className="player-delete"
-                  onClick={onDelete}
-                >
-                  <Icon
-                    name="trash"
-                    size={19}
-                  />
 
-                  Delete
-                </button>
-              )}
+            {session && (
+              <button
+                className="player-delete"
+                onClick={
+                  onDelete
+                }
+              >
+                <Icon
+                  name="trash"
+                  size={19}
+                />
+
+                Delete
+              </button>
+            )}
 
           </div>
+
 
           {video.description && (
             <div className="description-box">
@@ -2011,43 +3023,61 @@ function VideoPlayer({
   );
 }
 
-/* =========================
+
+/* =========================================================
    CHANNEL PAGE
-========================= */
+========================================================= */
 
 function ChannelPage({
   ownerId,
   videos,
   session,
+  signedUrls,
+  likes,
   subscriptions,
+  onLike,
   onSubscribe,
   onVideo,
+  onChannel,
   onDelete,
 }) {
   const channelVideos =
     videos.filter(
       (video) =>
         video.owner_id ===
-        ownerId
+          ownerId &&
+        (
+          video.moderation_status ===
+            "approved" ||
+          session?.user?.id ===
+            ownerId
+        )
     );
+
 
   const channelName =
     channelVideos[0]
       ?.channel_name ||
-    (session?.user?.id === ownerId
-      ? getChannelName(
-          session.user
-        )
-      : "LASAR Channel");
+    (
+      session?.user?.id ===
+      ownerId
+        ? getChannelName(
+            session.user
+          )
+        : "LASAR Channel"
+    );
+
 
   const isOwn =
     session?.user?.id ===
     ownerId;
 
+
   return (
     <section className="channel-page">
 
       <div className="channel-cover" />
+
 
       <div className="channel-header">
 
@@ -2057,9 +3087,12 @@ function ChannelPage({
             .toUpperCase()}
         </div>
 
+
         <div className="channel-info">
 
-          <h1>{channelName}</h1>
+          <h1>
+            {channelName}
+          </h1>
 
           <p>
             @
@@ -2078,26 +3111,33 @@ function ChannelPage({
 
         </div>
 
-        {session && !isOwn && (
-          <button
-            className={`subscribe-large ${
-              subscriptions.includes(
+
+        {session &&
+          !isOwn && (
+
+            <button
+              className={`subscribe-large ${
+                subscriptions.includes(
+                  ownerId
+                )
+                  ? "subscribed"
+                  : ""
+              }`}
+              onClick={() =>
+                onSubscribe(
+                  ownerId
+                )
+              }
+            >
+              {subscriptions.includes(
                 ownerId
               )
-                ? "subscribed"
-                : ""
-            }`}
-            onClick={() =>
-              onSubscribe(ownerId)
-            }
-          >
-            {subscriptions.includes(
-              ownerId
-            )
-              ? "Subscribed"
-              : "Subscribe"}
-          </button>
-        )}
+                ? "Subscribed"
+                : "Subscribe"}
+            </button>
+
+          )}
+
 
         {isOwn && (
           <button className="channel-manage">
@@ -2107,33 +3147,48 @@ function ChannelPage({
 
       </div>
 
+
       <div className="channel-tabs">
 
         <span className="active">
           Videos
         </span>
 
-        <span>Shorts</span>
+        <span>
+          Shorts
+        </span>
 
-        <span>About</span>
+        <span>
+          About
+        </span>
 
       </div>
 
+
       <VideoSection
         title="Videos"
-        videos={channelVideos}
+        videos={
+          channelVideos
+        }
         session={session}
-        likes={[]}
+        likes={likes}
         subscriptions={
           subscriptions
         }
-        onLike={() => {}}
+        onLike={onLike}
         onSubscribe={
           onSubscribe
         }
         onVideo={onVideo}
-        onChannel={() => {}}
-        onDelete={onDelete}
+        onChannel={
+          onChannel
+        }
+        onDelete={
+          onDelete
+        }
+        signedUrls={
+          signedUrls
+        }
         emptyTitle="No videos"
         emptyText={
           isOwn
@@ -2146,9 +3201,10 @@ function ChannelPage({
   );
 }
 
-/* =========================
-   SETTINGS PAGE
-========================= */
+
+/* =========================================================
+   SETTINGS
+========================================================= */
 
 function SettingsPage({
   session,
@@ -2167,14 +3223,20 @@ function SettingsPage({
         />
 
         <div>
-          <h1>Settings</h1>
+
+          <h1>
+            Settings
+          </h1>
+
           <p>
             Control your LASAR
             experience.
           </p>
+
         </div>
 
       </div>
+
 
       <div className="settings-card">
 
@@ -2183,10 +3245,11 @@ function SettingsPage({
           preferences
         </h2>
 
+
         <SettingRow
           icon="play"
           title="Autoplay"
-          text="Automatically play the next video."
+          text="Automatically play videos when opened."
           checked={
             settings.autoplay
           }
@@ -2196,6 +3259,7 @@ function SettingsPage({
             )
           }
         />
+
 
         <SettingRow
           icon="settings"
@@ -2210,6 +3274,7 @@ function SettingsPage({
             )
           }
         />
+
 
         <SettingRow
           icon="subscriptions"
@@ -2227,12 +3292,18 @@ function SettingsPage({
 
       </div>
 
+
       <div className="settings-card">
 
-        <h2>Account</h2>
+        <h2>
+          Account
+        </h2>
+
 
         {session ? (
+
           <>
+
             <div className="account-box">
 
               <div className="account-avatar">
@@ -2243,7 +3314,9 @@ function SettingsPage({
                   .toUpperCase()}
               </div>
 
+
               <div>
+
                 <strong>
                   {getChannelName(
                     session.user
@@ -2253,9 +3326,11 @@ function SettingsPage({
                 <span>
                   {session.user.email}
                 </span>
+
               </div>
 
             </div>
+
 
             <button
               className="settings-signout"
@@ -2263,30 +3338,16 @@ function SettingsPage({
             >
               Sign out
             </button>
+
           </>
+
         ) : (
+
           <p>
             You are not signed in.
           </p>
+
         )}
-
-      </div>
-
-      <div className="settings-card">
-
-        <h2>
-          Help and policy
-        </h2>
-
-        <p>LASAR</p>
-
-        <p>
-          Watch. Create. Share.
-        </p>
-
-        <small>
-          LASAR version 2.0
-        </small>
 
       </div>
 
@@ -2294,9 +3355,10 @@ function SettingsPage({
   );
 }
 
-/* =========================
+
+/* =========================================================
    SETTING ROW
-========================= */
+========================================================= */
 
 function SettingRow({
   icon,
@@ -2318,13 +3380,19 @@ function SettingRow({
         />
       </span>
 
+
       <span className="setting-text">
 
-        <strong>{title}</strong>
+        <strong>
+          {title}
+        </strong>
 
-        <small>{text}</small>
+        <small>
+          {text}
+        </small>
 
       </span>
+
 
       <span
         className={`toggle ${
@@ -2338,15 +3406,15 @@ function SettingRow({
   );
 }
 
-/* =========================
+
+/* =========================================================
    SIMPLE PAGE
-========================= */
+========================================================= */
 
 function SimplePage({
   title,
   icon,
   description,
-  videos,
   emptyTitle,
   emptyText,
 }) {
@@ -2360,76 +3428,1141 @@ function SimplePage({
         />
       </div>
 
-      <h1>{title}</h1>
+      <h1>
+        {title}
+      </h1>
 
-      <p>{description}</p>
+      <p>
+        {description}
+      </p>
 
-      {videos.length === 0 && (
+
+      <EmptyState
+        icon={icon}
+        title={emptyTitle}
+        text={emptyText}
+        signedIn
+      />
+
+    </section>
+  );
+}
+
+
+/* =========================================================
+   NOTIFICATION PANEL
+========================================================= */
+
+function NotificationPanel({
+  notifications,
+  readIds,
+  onOpen,
+  onMarkAllRead,
+}) {
+  return (
+    <div
+      style={{
+        position:
+          "absolute",
+
+        top:
+          "calc(100% + 12px)",
+
+        right: 0,
+
+        width: 360,
+
+        maxWidth:
+          "calc(100vw - 24px)",
+
+        maxHeight: 520,
+
+        overflowY:
+          "auto",
+
+        background:
+          "var(--surface, #fff)",
+
+        color:
+          "var(--text, #111)",
+
+        border:
+          "1px solid var(--border, #ddd)",
+
+        borderRadius: 16,
+
+        boxShadow:
+          "0 14px 40px rgba(0,0,0,.22)",
+
+        zIndex: 1000,
+      }}
+      onClick={(e) =>
+        e.stopPropagation()
+      }
+    >
+
+      <div
+        style={{
+          display:
+            "flex",
+
+          alignItems:
+            "center",
+
+          justifyContent:
+            "space-between",
+
+          padding:
+            "16px",
+
+          borderBottom:
+            "1px solid var(--border, #ddd)",
+        }}
+      >
+
+        <strong
+          style={{
+            fontSize: 18,
+          }}
+        >
+          Notifications
+        </strong>
+
+
+        {notifications.length >
+          0 && (
+
+          <button
+            type="button"
+            onClick={
+              onMarkAllRead
+            }
+            style={{
+              border: 0,
+              background:
+                "transparent",
+              cursor:
+                "pointer",
+              fontSize: 12,
+              fontWeight: 700,
+              color: "#065fd4",
+            }}
+          >
+            Mark all as read
+          </button>
+
+        )}
+
+      </div>
+
+
+      {notifications.length ===
+      0 ? (
+
+        <div
+          style={{
+            padding: 42,
+            textAlign:
+              "center",
+            opacity: 0.7,
+          }}
+        >
+
+          <Icon
+            name="bell"
+            size={34}
+          />
+
+          <p>
+            No notifications yet.
+          </p>
+
+        </div>
+
+      ) : (
+
+        notifications.map(
+          (item) => {
+
+            const unread =
+              !readIds.includes(
+                item.id
+              );
+
+
+            return (
+              <button
+                type="button"
+                key={item.id}
+                onClick={() =>
+                  onOpen(item)
+                }
+                style={{
+                  width:
+                    "100%",
+
+                  display:
+                    "flex",
+
+                  gap: 12,
+
+                  alignItems:
+                    "flex-start",
+
+                  textAlign:
+                    "left",
+
+                  padding:
+                    "14px 16px",
+
+                  border: 0,
+
+                  borderBottom:
+                    "1px solid #eee",
+
+                  background:
+                    unread
+                      ? "rgba(25,118,210,.09)"
+                      : "transparent",
+
+                  color:
+                    "inherit",
+
+                  cursor:
+                    "pointer",
+                }}
+              >
+
+                <span
+                  style={{
+                    width: 38,
+                    height: 38,
+                    flex:
+                      "0 0 38px",
+                    borderRadius:
+                      "50%",
+                    display:
+                      "grid",
+                    placeItems:
+                      "center",
+                    background:
+                      "rgba(127,127,127,.14)",
+                  }}
+                >
+                  <Icon
+                    name={
+                      item.icon
+                    }
+                    size={19}
+                  />
+                </span>
+
+
+                <span
+                  style={{
+                    minWidth: 0,
+                    flex: 1,
+                  }}
+                >
+
+                  <strong
+                    style={{
+                      display:
+                        "block",
+                      fontSize:
+                        14,
+                    }}
+                  >
+                    {item.title}
+                  </strong>
+
+
+                  <span
+                    style={{
+                      display:
+                        "block",
+                      marginTop:
+                        4,
+                      fontSize:
+                        13,
+                      lineHeight:
+                        1.4,
+                      opacity:
+                        0.78,
+                    }}
+                  >
+                    {item.text}
+                  </span>
+
+
+                  <small
+                    style={{
+                      display:
+                        "block",
+                      marginTop:
+                        6,
+                      opacity:
+                        0.6,
+                    }}
+                  >
+                    {formatDate(
+                      item.time
+                    )}
+                  </small>
+
+                </span>
+
+
+                {unread && (
+                  <span
+                    style={{
+                      width: 8,
+                      height: 8,
+                      marginTop: 7,
+                      borderRadius:
+                        "50%",
+                      background:
+                        "#ff0000",
+                      flex:
+                        "0 0 8px",
+                    }}
+                  />
+                )}
+
+              </button>
+            );
+          }
+        )
+
+      )}
+
+    </div>
+  );
+}
+
+
+/* =========================================================
+   ADMIN MODERATION
+========================================================= */
+
+function AdminModerationPage({
+  session,
+  videos,
+  signedUrls,
+  onApprove,
+  onReject,
+  onDelete,
+  onVideo,
+}) {
+  const [
+    filter,
+    setFilter,
+  ] = useState("pending");
+
+
+  if (!session) {
+    return (
+      <section
+        style={{
+          padding: 40,
+          textAlign:
+            "center",
+        }}
+      >
+
+        <Icon
+          name="shield"
+          size={45}
+        />
+
+        <h1>
+          Sign in required
+        </h1>
+
+        <p>
+          Sign in to open moderation.
+        </p>
+
+      </section>
+    );
+  }
+
+
+  const visibleVideos =
+    videos.filter(
+      (video) =>
+        (
+          video.moderation_status ||
+          "pending"
+        ) === filter
+    );
+
+
+  const pendingCount =
+    videos.filter(
+      (video) =>
+        video.moderation_status ===
+        "pending"
+    ).length;
+
+
+  const approvedCount =
+    videos.filter(
+      (video) =>
+        video.moderation_status ===
+        "approved"
+    ).length;
+
+
+  const rejectedCount =
+    videos.filter(
+      (video) =>
+        video.moderation_status ===
+        "rejected"
+    ).length;
+
+
+  return (
+    <section
+      style={{
+        padding:
+          "24px 20px 80px",
+
+        maxWidth: 1250,
+
+        margin:
+          "0 auto",
+      }}
+    >
+
+      <div
+        style={{
+          display:
+            "flex",
+
+          justifyContent:
+            "space-between",
+
+          alignItems:
+            "center",
+
+          gap: 20,
+
+          flexWrap:
+            "wrap",
+
+          marginBottom: 25,
+        }}
+      >
+
+        <div>
+
+          <div
+            style={{
+              display:
+                "flex",
+
+              alignItems:
+                "center",
+
+              gap: 12,
+            }}
+          >
+
+            <div
+              style={{
+                width: 48,
+                height: 48,
+                borderRadius: 14,
+                display:
+                  "grid",
+                placeItems:
+                  "center",
+                background:
+                  "#111827",
+                color:
+                  "white",
+              }}
+            >
+              <Icon
+                name="shield"
+                size={25}
+              />
+            </div>
+
+
+            <div>
+
+              <h1
+                style={{
+                  margin: 0,
+                  fontSize: 28,
+                }}
+              >
+                Admin Moderation
+              </h1>
+
+              <p
+                style={{
+                  margin:
+                    "5px 0 0",
+                  opacity:
+                    0.7,
+                }}
+              >
+                Review and manage LASAR uploads.
+              </p>
+
+            </div>
+
+          </div>
+
+        </div>
+
+
+        <div
+          style={{
+            padding:
+              "12px 16px",
+
+            borderRadius:
+              12,
+
+            background:
+              "#f3f4f6",
+          }}
+        >
+          <strong>
+            {pendingCount}
+          </strong>{" "}
+          pending review
+        </div>
+
+      </div>
+
+
+      <div
+        style={{
+          display:
+            "flex",
+
+          gap: 10,
+
+          flexWrap:
+            "wrap",
+
+          marginBottom:
+            25,
+        }}
+      >
+
+        <AdminFilterButton
+          active={
+            filter ===
+            "pending"
+          }
+          onClick={() =>
+            setFilter(
+              "pending"
+            )
+          }
+        >
+          Pending ({pendingCount})
+        </AdminFilterButton>
+
+
+        <AdminFilterButton
+          active={
+            filter ===
+            "approved"
+          }
+          onClick={() =>
+            setFilter(
+              "approved"
+            )
+          }
+        >
+          Approved ({approvedCount})
+        </AdminFilterButton>
+
+
+        <AdminFilterButton
+          active={
+            filter ===
+            "rejected"
+          }
+          onClick={() =>
+            setFilter(
+              "rejected"
+            )
+          }
+        >
+          Rejected ({rejectedCount})
+        </AdminFilterButton>
+
+      </div>
+
+
+      {visibleVideos.length ===
+      0 ? (
+
         <EmptyState
-          icon={icon}
-          title={emptyTitle}
-          text={emptyText}
+          icon="check"
+          title={`No ${filter} videos`}
+          text="New uploads will appear here."
           signedIn
         />
+
+      ) : (
+
+        <div
+          style={{
+            display:
+              "flex",
+
+            flexDirection:
+              "column",
+
+            gap: 18,
+          }}
+        >
+
+          {visibleVideos.map(
+            (video) => (
+
+              <AdminVideoCard
+                key={video.id}
+                video={video}
+                videoUrl={
+                  signedUrls[
+                    video.id
+                  ] || ""
+                }
+                onApprove={
+                  onApprove
+                }
+                onReject={
+                  onReject
+                }
+                onDelete={
+                  onDelete
+                }
+                onVideo={
+                  onVideo
+                }
+              />
+
+            )
+          )}
+
+        </div>
+
       )}
 
     </section>
   );
 }
 
-/* =========================
+
+/* =========================================================
+   ADMIN FILTER
+========================================================= */
+
+function AdminFilterButton({
+  active,
+  onClick,
+  children,
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        border:
+          active
+            ? "1px solid #111827"
+            : "1px solid #d1d5db",
+
+        background:
+          active
+            ? "#111827"
+            : "white",
+
+        color:
+          active
+            ? "white"
+            : "#111827",
+
+        padding:
+          "10px 16px",
+
+        borderRadius: 10,
+
+        cursor:
+          "pointer",
+
+        fontWeight: 600,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+
+/* =========================================================
+   ADMIN VIDEO CARD
+========================================================= */
+
+function AdminVideoCard({
+  video,
+  videoUrl,
+  onApprove,
+  onReject,
+  onDelete,
+  onVideo,
+}) {
+  const status =
+    video.moderation_status ||
+    "pending";
+
+
+  return (
+    <div
+      style={{
+        border:
+          "1px solid #e5e7eb",
+
+        borderRadius:
+          18,
+
+        padding:
+          18,
+
+        background:
+          "white",
+
+        boxShadow:
+          "0 4px 16px rgba(0,0,0,0.05)",
+      }}
+    >
+
+      <div
+        style={{
+          display:
+            "grid",
+
+          gridTemplateColumns:
+            "260px 1fr",
+
+          gap: 20,
+        }}
+      >
+
+        <button
+          onClick={() =>
+            onVideo(video)
+          }
+          style={{
+            border: 0,
+            padding: 0,
+            background:
+              "#111",
+
+            borderRadius:
+              14,
+
+            overflow:
+              "hidden",
+
+            minHeight:
+              150,
+
+            cursor:
+              "pointer",
+          }}
+        >
+
+          {videoUrl ? (
+
+            <video
+              src={videoUrl}
+              muted
+              preload="metadata"
+              style={{
+                width:
+                  "100%",
+
+                height:
+                  180,
+
+                objectFit:
+                  video.is_short
+                    ? "contain"
+                    : "cover",
+
+                background:
+                  "#111",
+              }}
+            />
+
+          ) : (
+
+            <div
+              style={{
+                height:
+                  180,
+
+                display:
+                  "grid",
+
+                placeItems:
+                  "center",
+
+                color:
+                  "white",
+              }}
+            >
+              <Icon
+                name="play"
+                size={45}
+              />
+            </div>
+
+          )}
+
+        </button>
+
+
+        <div>
+
+          <div
+            style={{
+              display:
+                "flex",
+
+              justifyContent:
+                "space-between",
+
+              gap: 10,
+
+              alignItems:
+                "flex-start",
+            }}
+          >
+
+            <h2
+              style={{
+                margin:
+                  "0 0 8px",
+              }}
+            >
+              {video.title}
+            </h2>
+
+
+            <span
+              style={{
+                padding:
+                  "5px 10px",
+
+                borderRadius:
+                  20,
+
+                fontSize:
+                  12,
+
+                fontWeight:
+                  700,
+
+                background:
+                  status ===
+                  "approved"
+                    ? "#dcfce7"
+                    : status ===
+                      "rejected"
+                    ? "#fee2e2"
+                    : "#fef3c7",
+              }}
+            >
+              {status
+                .charAt(0)
+                .toUpperCase() +
+                status.slice(1)}
+            </span>
+
+          </div>
+
+
+          <p>
+            Channel:{" "}
+            <strong>
+              {video.channel_name ||
+                "LASAR Channel"}
+            </strong>
+          </p>
+
+
+          <p>
+            Category:{" "}
+            <strong>
+              {video.category ||
+                "Other"}
+            </strong>
+          </p>
+
+
+          <p>
+            Type:{" "}
+            <strong>
+              {video.is_short
+                ? "Short"
+                : "Video"}
+            </strong>
+          </p>
+
+
+          <p>
+            Uploaded:{" "}
+            <strong>
+              {formatDate(
+                video.created_at
+              )}
+            </strong>
+          </p>
+
+
+          <div
+            style={{
+              padding: 12,
+
+              borderRadius:
+                10,
+
+              background:
+                "#f9fafb",
+            }}
+          >
+
+            <strong>
+              Description
+            </strong>
+
+            <p>
+              {video.description ||
+                "No description."}
+            </p>
+
+          </div>
+
+
+          <p>
+
+            <strong>
+              Copyright confirmation:
+            </strong>{" "}
+
+            {video.copyright_confirmed
+              ? "Confirmed"
+              : "Not confirmed"}
+
+          </p>
+
+
+          {video.moderation_reason && (
+
+            <div
+              style={{
+                padding:
+                  10,
+
+                borderRadius:
+                  10,
+
+                background:
+                  "#fff7ed",
+              }}
+            >
+              <strong>
+                Moderation reason:
+              </strong>{" "}
+              {video.moderation_reason}
+            </div>
+
+          )}
+
+
+          <div
+            style={{
+              display:
+                "flex",
+
+              gap: 10,
+
+              flexWrap:
+                "wrap",
+
+              marginTop:
+                16,
+            }}
+          >
+
+            <button
+              onClick={() =>
+                onVideo(video)
+              }
+            >
+              <Icon
+                name="play"
+                size={16}
+              />{" "}
+              Preview
+            </button>
+
+
+            {status ===
+              "pending" && (
+              <>
+                <button
+                  onClick={() =>
+                    onApprove(
+                      video
+                    )
+                  }
+                >
+                  <Icon
+                    name="check"
+                    size={16}
+                  />{" "}
+                  Approve
+                </button>
+
+                <button
+                  onClick={() =>
+                    onReject(
+                      video
+                    )
+                  }
+                >
+                  Reject
+                </button>
+              </>
+            )}
+
+
+            <button
+              onClick={() =>
+                onDelete(video)
+              }
+            >
+              <Icon
+                name="trash"
+                size={16}
+              />{" "}
+              Delete
+            </button>
+
+          </div>
+
+        </div>
+
+      </div>
+
+    </div>
+  );
+}
+
+
+/* =========================================================
    UPLOAD MODAL
-========================= */
+========================================================= */
 
 function UploadModal({
   session,
   onClose,
   onUploaded,
 }) {
-  const [type, setType] =
-    useState("video");
+  const [
+    type,
+    setType,
+  ] = useState("video");
 
-  const [title, setTitle] =
-    useState("");
+  const [
+    title,
+    setTitle,
+  ] = useState("");
 
-  const [description, setDescription] =
-    useState("");
+  const [
+    description,
+    setDescription,
+  ] = useState("");
 
-  const [category, setCategory] =
-    useState("Technology");
+  const [
+    category,
+    setCategory,
+  ] = useState("Technology");
 
-  const [file, setFile] =
-    useState(null);
+  const [
+    file,
+    setFile,
+  ] = useState(null);
 
-  const [uploading, setUploading] =
-    useState(false);
+  const [
+    uploading,
+    setUploading,
+  ] = useState(false);
 
-  const [error, setError] =
-    useState("");
+  const [
+    error,
+    setError,
+  ] = useState("");
+
+  const [
+    copyrightConfirmed,
+    setCopyrightConfirmed,
+  ] = useState(false);
+
 
   async function uploadVideo(e) {
     e.preventDefault();
+
+    setError("");
+
 
     if (!session) {
       setError(
         "Please sign in first."
       );
+
       return;
     }
+
 
     if (!title.trim()) {
       setError(
         "Please enter a video title."
       );
+
       return;
     }
+
+
+    if (title.trim().length < 3) {
+      setError(
+        "Title must be at least 3 characters."
+      );
+
+      return;
+    }
+
 
     if (!file) {
       setError(
         "Please select a video file."
       );
+
       return;
     }
+
 
     if (
       !file.type.startsWith(
@@ -2439,123 +4572,229 @@ function UploadModal({
       setError(
         "Please select a video file."
       );
+
       return;
     }
 
+
     if (
       file.size >
-      50 * 1024 * 1024
+      MAX_VIDEO_SIZE
     ) {
       setError(
         "Maximum file size is 50 MB."
       );
+
       return;
     }
+
+
+    if (
+      description.trim()
+        .length < 10
+    ) {
+      setError(
+        "Description must be at least 10 characters."
+      );
+
+      return;
+    }
+
+
+    if (
+      BLOCKED_CONTENT.test(
+        `${title} ${description} ${file.name}`
+      )
+    ) {
+      setError(
+        "This content cannot be uploaded to LASAR."
+      );
+
+      return;
+    }
+
+
+    if (!copyrightConfirmed) {
+      setError(
+        "Please confirm that you own the rights to this video."
+      );
+
+      return;
+    }
+
 
     setUploading(true);
-    setError("");
 
-    const safeName =
-      file.name
-        .replace(
-          /[^a-zA-Z0-9._-]/g,
-          "-"
-        )
-        .toLowerCase();
 
-    const storagePath = `${
-      session.user.id
-    }/${crypto.randomUUID()}-${safeName}`;
+    try {
 
-    /* Upload file */
+      const contentHash =
+        await sha256Hex(
+          file
+        );
 
-    const {
-      error: uploadError,
-    } = await supabase.storage
-      .from("videos")
-      .upload(
-        storagePath,
-        file,
-        {
-          cacheControl: "3600",
-          upsert: false,
-          contentType:
-            file.type,
-        }
-      );
 
-    if (uploadError) {
-      setError(
-        uploadError.message
-      );
-      setUploading(false);
-      return;
-    }
-
-    /* Get public URL */
-
-    const {
-      data: publicData,
-    } = supabase.storage
-      .from("videos")
-      .getPublicUrl(
-        storagePath
-      );
-
-    /* Save database record */
-
-    const {
-      error: insertError,
-    } = await supabase
-      .from("videos")
-      .insert({
-        owner_id:
-          session.user.id,
-
-        channel_name:
-          getChannelName(
-            session.user
-          ),
-
-        title:
-          title.trim(),
-
-        description:
-          description.trim(),
-
-        category,
-
-        is_short:
-          type === "short",
-
-        storage_path:
-          storagePath,
-
-        video_url:
-          publicData.publicUrl,
-
-        views: 0,
-      });
-
-    if (insertError) {
-      await supabase.storage
+      const {
+        data:
+          duplicateRows,
+        error:
+          duplicateError,
+      } = await supabase
         .from("videos")
-        .remove([
-          storagePath,
-        ]);
+        .select("id")
+        .eq(
+          "content_hash",
+          contentHash
+        )
+        .limit(1);
 
-      setError(
-        insertError.message
+
+      if (duplicateError) {
+        console.error(
+          "Duplicate check:",
+          duplicateError
+        );
+      }
+
+
+      if (
+        (duplicateRows || [])
+          .length > 0
+      ) {
+        setError(
+          "This video already exists on LASAR."
+        );
+
+        return;
+      }
+
+
+      const safeName =
+        file.name
+          .replace(
+            /[^a-zA-Z0-9._-]/g,
+            "-"
+          )
+          .toLowerCase();
+
+
+      const storagePath =
+        `${session.user.id}/` +
+        `${crypto.randomUUID()}-` +
+        `${safeName}`;
+
+
+      const {
+        error:
+          uploadError,
+      } = await supabase.storage
+        .from("videos")
+        .upload(
+          storagePath,
+          file,
+          {
+            cacheControl:
+              "3600",
+
+            upsert:
+              false,
+
+            contentType:
+              file.type,
+          }
+        );
+
+
+      if (uploadError) {
+        setError(
+          uploadError.message
+        );
+
+        return;
+      }
+
+
+      const {
+        error:
+          insertError,
+      } = await supabase
+        .from("videos")
+        .insert({
+          owner_id:
+            session.user.id,
+
+          channel_name:
+            getChannelName(
+              session.user
+            ),
+
+          title:
+            title.trim(),
+
+          description:
+            description.trim(),
+
+          category,
+
+          is_short:
+            type === "short",
+
+          storage_path:
+            storagePath,
+
+          video_url:
+            "",
+
+          views:
+            0,
+
+          moderation_status:
+            "pending",
+
+          copyright_confirmed:
+            true,
+
+          content_hash:
+            contentHash,
+        });
+
+
+      if (insertError) {
+
+        await supabase.storage
+          .from("videos")
+          .remove([
+            storagePath,
+          ]);
+
+        setError(
+          insertError.message
+        );
+
+        return;
+      }
+
+
+      onUploaded();
+
+    } catch (uploadException) {
+
+      console.error(
+        uploadException
       );
 
+      setError(
+        uploadException?.message ||
+          "Upload failed."
+      );
+
+    } finally {
+
       setUploading(false);
-      return;
+
     }
-
-    setUploading(false);
-
-    onUploaded();
   }
+
 
   return (
     <div className="modal-overlay">
@@ -2565,21 +4804,29 @@ function UploadModal({
         <div className="modal-header">
 
           <div>
-            <h2>Create</h2>
+
+            <h2>
+              Create
+            </h2>
 
             <p>
-              Upload a video to
-              your LASAR channel.
+              Upload a video to your LASAR channel.
             </p>
+
           </div>
+
 
           <button
             onClick={onClose}
+            type="button"
           >
-            <Icon name="close" />
+            <Icon
+              name="close"
+            />
           </button>
 
         </div>
+
 
         <div className="upload-tabs">
 
@@ -2602,6 +4849,7 @@ function UploadModal({
             Video
           </button>
 
+
           <button
             className={
               type === "short"
@@ -2623,11 +4871,15 @@ function UploadModal({
 
         </div>
 
+
         <form
-          onSubmit={uploadVideo}
+          onSubmit={
+            uploadVideo
+          }
         >
 
           <label>
+
             Video file
 
             <input
@@ -2640,9 +4892,12 @@ function UploadModal({
                 )
               }
             />
+
           </label>
 
+
           {file && (
+
             <div className="selected-file">
 
               <Icon
@@ -2653,9 +4908,12 @@ function UploadModal({
               {file.name}
 
             </div>
+
           )}
 
+
           <label>
+
             Title
 
             <input
@@ -2669,13 +4927,18 @@ function UploadModal({
               placeholder="Enter video title"
               maxLength={100}
             />
+
           </label>
 
+
           <label>
+
             Description
 
             <textarea
-              value={description}
+              value={
+                description
+              }
               onChange={(e) =>
                 setDescription(
                   e.target.value
@@ -2684,9 +4947,12 @@ function UploadModal({
               placeholder="Tell viewers about your video"
               rows={4}
             />
+
           </label>
 
+
           <label>
+
             Category
 
             <select
@@ -2697,52 +4963,123 @@ function UploadModal({
                 )
               }
             >
-              <option>
-                Technology
-              </option>
 
-              <option>
-                Music
-              </option>
+              {[
+                "Technology",
+                "Music",
+                "Gaming",
+                "Movies",
+                "Learning",
+                "Comedy",
+                "News",
+                "Other",
+              ].map(
+                (item) => (
+                  <option
+                    key={item}
+                  >
+                    {item}
+                  </option>
+                )
+              )}
 
-              <option>
-                Gaming
-              </option>
-
-              <option>
-                Movies
-              </option>
-
-              <option>
-                Learning
-              </option>
-
-              <option>
-                Comedy
-              </option>
-
-              <option>
-                News
-              </option>
-
-              <option>
-                Other
-              </option>
             </select>
+
           </label>
 
-          {type === "short" && (
+
+          {type ===
+            "short" && (
+
             <div className="short-notice">
-              This upload will appear
-              in Shorts.
+              This upload will appear in Shorts.
             </div>
+
           )}
+
+
+          <label
+            style={{
+              display:
+                "flex",
+
+              flexDirection:
+                "row",
+
+              alignItems:
+                "flex-start",
+
+              gap: 10,
+
+              cursor:
+                "pointer",
+
+              marginTop:
+                14,
+            }}
+          >
+
+            <input
+              type="checkbox"
+              checked={
+                copyrightConfirmed
+              }
+              onChange={(e) =>
+                setCopyrightConfirmed(
+                  e.target.checked
+                )
+              }
+              style={{
+                width: 18,
+                height: 18,
+                marginTop: 2,
+              }}
+            />
+
+
+            <span
+              style={{
+                lineHeight:
+                  1.45,
+              }}
+            >
+              I confirm that I own
+              the rights to this
+              video or have
+              permission to upload
+              it to LASAR.
+            </span>
+
+          </label>
+
+
+          <div
+            style={{
+              marginTop: 10,
+
+              padding: 10,
+
+              borderRadius: 8,
+
+              background:
+                "#f8fafc",
+
+              fontSize: 13,
+            }}
+          >
+            Your upload will be
+            reviewed before it
+            becomes visible to
+            other users.
+          </div>
+
 
           {error && (
             <div className="form-error">
               {error}
             </div>
           )}
+
 
           <div className="upload-footer">
 
@@ -2751,9 +5088,13 @@ function UploadModal({
               50 MB
             </span>
 
+
             <button
               className="primary-button"
-              disabled={uploading}
+              disabled={
+                uploading
+              }
+              type="submit"
             >
               {uploading
                 ? "Uploading..."
@@ -2770,59 +5111,63 @@ function UploadModal({
   );
 }
 
-/* =====================================================
+
+/* =========================================================
    AUTH MODAL
-
-   This section now supports:
-
-   SIGN IN
-   SIGN UP
-   FORGOT PASSWORD
-   CREATE NEW PASSWORD
-===================================================== */
+========================================================= */
 
 function AuthModal({
   mode,
   setMode,
   onClose,
 }) {
-  const [email, setEmail] =
-    useState("");
+  const [
+    email,
+    setEmail,
+  ] = useState("");
 
-  const [password, setPassword] =
-    useState("");
+  const [
+    password,
+    setPassword,
+  ] = useState("");
 
-  const [newPassword, setNewPassword] =
-    useState("");
+  const [
+    newPassword,
+    setNewPassword,
+  ] = useState("");
 
-  const [confirmPassword, setConfirmPassword] =
-    useState("");
+  const [
+    confirmPassword,
+    setConfirmPassword,
+  ] = useState("");
 
-  const [name, setName] =
-    useState("");
+  const [
+    name,
+    setName,
+  ] = useState("");
 
-  const [busy, setBusy] =
-    useState(false);
+  const [
+    busy,
+    setBusy,
+  ] = useState(false);
 
-  const [error, setError] =
-    useState("");
+  const [
+    error,
+    setError,
+  ] = useState("");
 
-  const [success, setSuccess] =
-    useState("");
+  const [
+    success,
+    setSuccess,
+  ] = useState("");
 
-  /* =========================
-     CHANGE AUTH MODE
-  ========================= */
 
-  function changeMode(nextMode) {
-    setMode(nextMode);
+  function changeMode(next) {
+    setMode(next);
     setError("");
     setSuccess("");
   }
 
-  /* =========================
-     AUTH SUBMIT
-  ========================= */
 
   async function submit(e) {
     e.preventDefault();
@@ -2831,58 +5176,74 @@ function AuthModal({
     setError("");
     setSuccess("");
 
+
     try {
 
-      /* =========================
-         SIGN UP
-      ========================= */
+      /* SIGN UP */
 
       if (mode === "signup") {
 
         const cleanEmail =
           email.trim();
 
+
         if (!cleanEmail) {
           setError(
             "Please enter your email."
           );
+
           return;
         }
 
-        if (password.length < 6) {
+
+        if (
+          password.length <
+          6
+        ) {
           setError(
             "Password must be at least 6 characters."
           );
+
           return;
         }
 
-        const {
-          error: signUpError,
-        } = await supabase.auth.signUp({
-          email: cleanEmail,
-          password,
 
-          options: {
-            data: {
-              display_name:
-                name.trim() ||
-                cleanEmail.split(
-                  "@"
-                )[0],
-            },
-          },
-        });
+        const {
+          error:
+            signUpError,
+        } =
+          await supabase.auth
+            .signUp({
+              email:
+                cleanEmail,
+
+              password,
+
+              options: {
+                data: {
+                  display_name:
+                    name.trim() ||
+                    cleanEmail.split(
+                      "@"
+                    )[0],
+                },
+              },
+            });
+
 
         if (signUpError) {
           setError(
             signUpError.message
           );
+
           return;
         }
+
 
         setSuccess(
           "Account created successfully!"
         );
+
 
         setTimeout(
           onClose,
@@ -2892,85 +5253,100 @@ function AuthModal({
         return;
       }
 
-      /* =========================
-         SIGN IN
-      ========================= */
+
+      /* SIGN IN */
 
       if (mode === "signin") {
 
         const cleanEmail =
           email.trim();
 
+
         if (!cleanEmail) {
           setError(
             "Please enter your email."
           );
+
           return;
         }
+
 
         if (!password) {
           setError(
             "Please enter your password."
           );
+
           return;
         }
 
+
         const {
-          error: signInError,
+          error:
+            signInError,
         } =
-          await supabase.auth.signInWithPassword(
-            {
+          await supabase.auth
+            .signInWithPassword({
               email:
                 cleanEmail,
+
               password,
-            }
-          );
+            });
+
 
         if (signInError) {
           setError(
             signInError.message
           );
+
           return;
         }
+
 
         onClose();
 
         return;
       }
 
-      /* =========================
-         FORGOT PASSWORD
-      ========================= */
+
+      /* FORGOT PASSWORD */
 
       if (mode === "forgot") {
 
         const cleanEmail =
           email.trim();
 
+
         if (!cleanEmail) {
           setError(
             "Please enter your email."
           );
+
           return;
         }
 
+
         const {
-          error: resetError,
+          error:
+            resetError,
         } =
-          await supabase.auth.resetPasswordForEmail(
-            cleanEmail,
-            {
-              redirectTo:
-                window.location.origin,
-            }
-          );
+          await supabase.auth
+            .resetPasswordForEmail(
+              cleanEmail,
+              {
+                redirectTo:
+                  window.location.origin,
+              }
+            );
+
 
         if (resetError) {
           setError(
             resetError.message
           );
+
           return;
         }
+
 
         setSuccess(
           "Password reset email sent. Open it and tap the reset link."
@@ -2979,20 +5355,22 @@ function AuthModal({
         return;
       }
 
-      /* =========================
-         CREATE NEW PASSWORD
-      ========================= */
+
+      /* RESET PASSWORD */
 
       if (mode === "reset") {
 
         if (
-          newPassword.length < 6
+          newPassword.length <
+          6
         ) {
           setError(
             "New password must be at least 6 characters."
           );
+
           return;
         }
+
 
         if (
           newPassword !==
@@ -3001,29 +5379,35 @@ function AuthModal({
           setError(
             "The two passwords do not match."
           );
+
           return;
         }
 
+
         const {
-          error: updateError,
+          error:
+            updateError,
         } =
-          await supabase.auth.updateUser(
-            {
+          await supabase.auth
+            .updateUser({
               password:
                 newPassword,
-            }
-          );
+            });
+
 
         if (updateError) {
           setError(
             updateError.message
           );
+
           return;
         }
+
 
         setSuccess(
           "Password updated successfully!"
         );
+
 
         setTimeout(
           onClose,
@@ -3032,13 +5416,12 @@ function AuthModal({
       }
 
     } finally {
+
       setBusy(false);
+
     }
   }
 
-  /* =========================
-     AUTH UI
-  ========================= */
 
   return (
     <div className="modal-overlay">
@@ -3050,12 +5433,18 @@ function AuthModal({
           onClick={onClose}
           type="button"
         >
-          <Icon name="close" />
+          <Icon
+            name="close"
+          />
         </button>
 
+
         <div className="auth-logo">
-          <span>A</span>
+          <span>
+            A
+          </span>
         </div>
+
 
         <h2>
 
@@ -3069,6 +5458,7 @@ function AuthModal({
 
         </h2>
 
+
         <p>
 
           {mode === "signin"
@@ -3081,14 +5471,16 @@ function AuthModal({
 
         </p>
 
+
         <form
           onSubmit={submit}
         >
 
-          {/* CHANNEL NAME */}
+          {mode ===
+            "signup" && (
 
-          {mode === "signup" && (
             <label>
+
               Channel name
 
               <input
@@ -3100,15 +5492,20 @@ function AuthModal({
                 }
                 placeholder="Your channel name"
               />
+
             </label>
+
           )}
 
-          {/* EMAIL */}
 
-          {(mode === "signin" ||
-            mode === "signup" ||
-            mode === "forgot") && (
+          {[
+            "signin",
+            "signup",
+            "forgot",
+          ].includes(mode) && (
+
             <label>
+
               Email
 
               <input
@@ -3122,14 +5519,19 @@ function AuthModal({
                 placeholder="you@example.com"
                 required
               />
+
             </label>
+
           )}
 
-          {/* NORMAL PASSWORD */}
 
-          {(mode === "signin" ||
-            mode === "signup") && (
+          {[
+            "signin",
+            "signup",
+          ].includes(mode) && (
+
             <label>
+
               Password
 
               <input
@@ -3144,14 +5546,19 @@ function AuthModal({
                 minLength={6}
                 required
               />
+
             </label>
+
           )}
 
-          {/* NEW PASSWORD */}
 
-          {mode === "reset" && (
+          {mode ===
+            "reset" && (
+
             <>
+
               <label>
+
                 New password
 
                 <input
@@ -3168,9 +5575,12 @@ function AuthModal({
                   minLength={6}
                   required
                 />
+
               </label>
 
+
               <label>
+
                 Confirm new password
 
                 <input
@@ -3187,11 +5597,13 @@ function AuthModal({
                   minLength={6}
                   required
                 />
+
               </label>
+
             </>
+
           )}
 
-          {/* ERROR */}
 
           {error && (
             <div className="form-error">
@@ -3199,7 +5611,6 @@ function AuthModal({
             </div>
           )}
 
-          {/* SUCCESS */}
 
           {success && (
             <div className="form-success">
@@ -3207,33 +5618,34 @@ function AuthModal({
             </div>
           )}
 
-          {/* SUBMIT */}
 
           <button
             className="auth-submit"
             disabled={busy}
             type="submit"
           >
-
             {busy
               ? "Please wait..."
-              : mode === "signin"
+              : mode ===
+                "signin"
               ? "Sign in"
-              : mode === "signup"
+              : mode ===
+                "signup"
               ? "Create account"
-              : mode === "forgot"
+              : mode ===
+                "forgot"
               ? "Send reset email"
               : "Create new password"}
-
           </button>
 
         </form>
 
-        {/* AUTH LINKS */}
 
         <div className="auth-links">
 
-          {mode === "signin" && (
+          {mode ===
+            "signin" && (
+
             <>
               <button
                 type="button"
@@ -3246,10 +5658,6 @@ function AuthModal({
                 Forgot password?
               </button>
 
-              <span>
-                Don't have an account?
-              </span>
-
               <button
                 type="button"
                 onClick={() =>
@@ -3261,28 +5669,30 @@ function AuthModal({
                 Create account
               </button>
             </>
+
           )}
 
-          {mode === "signup" && (
-            <>
-              <span>
-                Already have an account?
-              </span>
 
-              <button
-                type="button"
-                onClick={() =>
-                  changeMode(
-                    "signin"
-                  )
-                }
-              >
-                Sign in
-              </button>
-            </>
+          {mode ===
+            "signup" && (
+
+            <button
+              type="button"
+              onClick={() =>
+                changeMode(
+                  "signin"
+                )
+              }
+            >
+              Sign in
+            </button>
+
           )}
 
-          {mode === "forgot" && (
+
+          {mode ===
+            "forgot" && (
+
             <button
               type="button"
               onClick={() =>
@@ -3293,9 +5703,13 @@ function AuthModal({
             >
               Back to sign in
             </button>
+
           )}
 
-          {mode === "reset" && (
+
+          {mode ===
+            "reset" && (
+
             <button
               type="button"
               onClick={() =>
@@ -3306,6 +5720,7 @@ function AuthModal({
             >
               Back to sign in
             </button>
+
           )}
 
         </div>
